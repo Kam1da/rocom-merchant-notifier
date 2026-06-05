@@ -449,7 +449,8 @@ class MerchantTrayApp:
         sx = (root.winfo_screenwidth() - w) // 2
         sy = (root.winfo_screenheight() - h) // 2
         root.geometry(f"+{sx}+{sy}")
-        root.deiconify()  # 居中后再显示
+        root.update()  # 让窗口管理器完成定位
+        root.after(200, root.deiconify)  # 延迟 200ms 再显示，避免残影
 
         root.mainloop()
 
