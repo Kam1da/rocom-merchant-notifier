@@ -1,7 +1,7 @@
 """远行商人托盘程序 — 入口。
 
 启动后常驻系统托盘，在 8:30/12:30/16:30/20:30 抓取远行商人商品数据，
-每小时 :30 提醒关注商品，基于商品指纹智能决策是否推送 Windows 通知。
+无关注命中时每小时 :30 提醒，有关注命中时每 10 分钟提醒。
 """
 
 import io
@@ -53,8 +53,9 @@ APP_TITLE = "远行商人"
 
 # 抓取时间点（北京时间）
 FETCH_SCHEDULE = [(8, 30), (12, 30), (16, 30), (20, 30)]
-# 关注提醒触发分钟（每小时的第 30 分钟）
-REMINDER_MINUTE = 30
+# 关注提醒间隔（分钟）
+REMINDER_INTERVAL_NORMAL = 60   # 无关注命中时，每小时 :30 提醒
+REMINDER_INTERVAL_HIT = 10      # 有关注命中时，每 10 分钟提醒
 # 连续抓取失败多少次后弹窗告警
 MAX_SILENT_FAILURES = 3
 
@@ -217,19 +218,11 @@ class MerchantTrayApp:
         self._icon = None
         self._running = False
         self._watchlist = set()
-        # ── 智能通知状态 ──
-        self._last_fp: tuple[str, ...] = ()          # 上次商品指纹
+        # ── 通知状态 ──
         self._current_round: int | None = None        # 当前轮次号
         self._fail_count: int = 0                     # 连续失败次数
         self._watchlist_hit_names: set[str] = set()   # 当前命中的关注商品
         self._watchlist_snoozed: bool = False          # 本轮是否已静音关注提醒
-
-    # ── 指纹 ──────────────────────────────────────────────────
-
-    @staticmethod
-    def _fingerprint(items: list[dict]) -> tuple[str, ...]:
-        """商品指纹：排序后的商品名元组，仅与商品名有关。"""
-        return tuple(sorted(it.get("name", "") for it in items))
 
     # ── 名单 ──────────────────────────────────────────────────
 
@@ -257,10 +250,10 @@ class MerchantTrayApp:
         except Exception as exc:
             print(f"[名单保存失败] {exc}")
 
-    # ── 数据抓取 + 智能通知 ──────────────────────────────────
+    # ── 数据抓取 + 通知 ──────────────────────────────────────
 
     def _do_fetch_and_process(self) -> None:
-        """抓取数据并按指纹决策树处理通知。"""
+        """抓取数据并处理通知。"""
         ts = beijing_stamp(now_beijing())
         try:
             data = fetch_merchant_data()
@@ -280,9 +273,8 @@ class MerchantTrayApp:
         save_latest(data, CACHE_FILE)
 
         items = active_items(data)
-        new_fp = self._fingerprint(items)
         new_round = data.get("round")
-        print(f"[抓取成功] 轮次={new_round} 指纹={new_fp} @ {ts}")
+        print(f"[抓取成功] 轮次={new_round} @ {ts}")
 
         # ── 轮次变化：重置关注提醒状态 ──
         round_changed = (new_round != self._current_round)
@@ -292,39 +284,22 @@ class MerchantTrayApp:
             self._watchlist_hit_names.clear()
             self._watchlist_snoozed = False
 
-        # ── 指纹比较 ──
-        fp_changed = (new_fp != self._last_fp)
-
-        if fp_changed:
-            print(f"[指纹变化] {self._last_fp} → {new_fp}")
-            self._watchlist_snoozed = False  # 商品变化自动恢复提醒
-
-        # 更新指纹和托盘提示（无论是否变化）
-        self._last_fp = new_fp
+        # 更新托盘提示
         self._update_tooltip()
 
         # ── 关注名单命中检测 ──
-        fresh_hits: set[str] = set()
         if self._watchlist:
             current_names = {it.get("name", "") for it in items}
-            new_hits = current_names & self._watchlist
-            fresh_hits = new_hits - self._watchlist_hit_names
-            self._watchlist_hit_names = new_hits
+            self._watchlist_hit_names = current_names & self._watchlist
 
-        # ── 合并通知（最多弹一次） ──
+        # ── 通知 ──
         summary = build_names_summary(data, self._watchlist)
-        if fp_changed and fresh_hits and not self._watchlist_snoozed:
-            hit_list = ", ".join(sorted(fresh_hits))
-            title = f"★ 商品更新（含关注：{hit_list}）"
-            _notify(title, summary)
-            print(f"[商品更新+关注命中] {hit_list}")
-        elif fp_changed:
-            _notify("商品更新", summary)
-        elif fresh_hits and not self._watchlist_snoozed:
-            hit_list = ", ".join(sorted(fresh_hits))
-            title = f"★ 名单商品出现！{hit_list}"
-            _notify(title, summary)
+        if self._watchlist_hit_names and not self._watchlist_snoozed:
+            hit_list = ", ".join(sorted(self._watchlist_hit_names))
+            _notify(f"★ 关注商品在售：{hit_list}", summary)
             print(f"[关注命中] {hit_list}")
+        else:
+            _notify("商品数据已更新", summary)
 
     # ── 菜单回调 ──────────────────────────────────────────────
 
@@ -530,29 +505,45 @@ class MerchantTrayApp:
             print(f"[定时抓取] 触发 @ {beijing_stamp(now_beijing())}")
             self._do_fetch_and_process()
 
-    # ── 关注商品定时提醒循环 ─────────────────────────────────
+    # ── 关注商品提醒循环 ─────────────────────────────────────
 
     def _watchlist_reminder_loop(self):
-        """每小时 :30 分检查，如果有关注商品命中且未静音则提醒。"""
-        last_reminder_key = ""
+        """关注商品命中时每 10 分钟提醒，否则每小时 :30 提醒。"""
+        last_reminder_time: float = 0
+
         while self._running:
-            now = now_beijing()
-            if now.minute == REMINDER_MINUTE:
-                key = f"{now.hour}:{now.minute}"
-                if key != last_reminder_key:
-                    last_reminder_key = key
-                    if self._watchlist_hit_names and not self._watchlist_snoozed:
-                        hit_list = ", ".join(sorted(self._watchlist_hit_names))
-                        title = f"★ 关注商品仍在售：{hit_list}"
-                        data = load_latest(CACHE_FILE)
-                        summary = build_names_summary(data, self._watchlist) if data else hit_list
-                        _notify(title, summary)
-                        print(f"[定时提醒] {hit_list}")
-            # 每分钟检查一次
-            for _ in range(60):
+            # 每 30 秒检查一次
+            for _ in range(30):
                 if not self._running:
                     return
                 time_module.sleep(1)
+
+            now = now_beijing()
+            now_ts = now.timestamp()
+
+            if self._watchlist_hit_names and not self._watchlist_snoozed:
+                # 有关注命中：每 10 分钟提醒
+                if now_ts - last_reminder_time >= REMINDER_INTERVAL_HIT * 60:
+                    last_reminder_time = now_ts
+                    hit_list = ", ".join(sorted(self._watchlist_hit_names))
+                    title = f"★ 关注商品仍在售：{hit_list}"
+                    data = load_latest(CACHE_FILE)
+                    summary = build_names_summary(data, self._watchlist) if data else hit_list
+                    _notify(title, summary)
+                    print(f"[关注提醒] {hit_list}")
+            else:
+                # 无关注命中：每小时 :30 提醒
+                if now.minute == 30:
+                    data = load_latest(CACHE_FILE)
+                    if data:
+                        summary = build_names_summary(data, self._watchlist)
+                        _notify("商品数据提醒", summary)
+                        print(f"[定时提醒] @ {beijing_stamp(now)}")
+                    # 等 60 秒避免同一分钟重复触发
+                    for _ in range(60):
+                        if not self._running:
+                            return
+                        time_module.sleep(1)
 
     # ── 启动 ──────────────────────────────────────────────────
 
