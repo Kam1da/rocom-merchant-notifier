@@ -301,7 +301,7 @@ class MerchantTrayApp:
                 _notify(f"★ 关注商品在售：{hit_list}", summary)
                 print(f"[关注命中] {hit_list}")
             else:
-                _notify("商品数据已更新", summary)
+                _notify("当前出售商品", summary)
         # 重置提醒计时器，避免与提醒循环重复
         self._last_reminder_ts = now_beijing().timestamp()
 
@@ -337,9 +337,7 @@ class MerchantTrayApp:
         root.attributes("-topmost", True)
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         _set_tk_window_icon(root, tk)
-
-        # 居中
-        root.update_idletasks()
+        root.withdraw()  # 先隐藏，布局完再居中显示
 
         main_frame = ttk.Frame(root, padding=16)
         main_frame.pack(fill="both", expand=True)
@@ -451,6 +449,7 @@ class MerchantTrayApp:
         sx = (root.winfo_screenwidth() - w) // 2
         sy = (root.winfo_screenheight() - h) // 2
         root.geometry(f"+{sx}+{sy}")
+        root.deiconify()  # 居中后再显示
 
         root.mainloop()
 
