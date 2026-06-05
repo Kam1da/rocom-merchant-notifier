@@ -53,6 +53,7 @@ APP_TITLE = "远行商人"
 
 # 抓取时间点（北京时间）
 FETCH_SCHEDULE = [(8, 30), (12, 30), (16, 30), (20, 30)]
+_FETCH_HOURS = {h for h, m in FETCH_SCHEDULE}
 # 关注提醒间隔（分钟）
 REMINDER_INTERVAL_NORMAL = 60   # 无关注命中时，每小时 :30 提醒
 REMINDER_INTERVAL_HIT = 10      # 有关注命中时，每 10 分钟提醒
@@ -223,6 +224,7 @@ class MerchantTrayApp:
         self._fail_count: int = 0                     # 连续失败次数
         self._watchlist_hit_names: set[str] = set()   # 当前命中的关注商品
         self._watchlist_snoozed: bool = False          # 本轮是否已静音关注提醒
+        self._last_reminder_ts: float = 0              # 上次提醒时间戳（避免与抓取通知重复）
 
     # ── 名单 ──────────────────────────────────────────────────
 
@@ -300,6 +302,8 @@ class MerchantTrayApp:
             print(f"[关注命中] {hit_list}")
         else:
             _notify("商品数据已更新", summary)
+        # 重置提醒计时器，避免与提醒循环重复
+        self._last_reminder_ts = now_beijing().timestamp()
 
     # ── 菜单回调 ──────────────────────────────────────────────
 
@@ -509,8 +513,6 @@ class MerchantTrayApp:
 
     def _watchlist_reminder_loop(self):
         """关注商品命中时每 10 分钟提醒，否则每小时 :30 提醒。"""
-        last_reminder_time: float = 0
-
         while self._running:
             # 每 30 秒检查一次
             for _ in range(30):
@@ -523,8 +525,8 @@ class MerchantTrayApp:
 
             if self._watchlist_hit_names and not self._watchlist_snoozed:
                 # 有关注命中：每 10 分钟提醒
-                if now_ts - last_reminder_time >= REMINDER_INTERVAL_HIT * 60:
-                    last_reminder_time = now_ts
+                if now_ts - self._last_reminder_ts >= REMINDER_INTERVAL_HIT * 60:
+                    self._last_reminder_ts = now_ts
                     hit_list = ", ".join(sorted(self._watchlist_hit_names))
                     title = f"★ 关注商品仍在售：{hit_list}"
                     data = load_latest(CACHE_FILE)
@@ -532,8 +534,8 @@ class MerchantTrayApp:
                     _notify(title, summary)
                     print(f"[关注提醒] {hit_list}")
             else:
-                # 无关注命中：每小时 :30 提醒
-                if now.minute == 30:
+                # 无关注命中：每小时 :30 提醒（跳过抓取时间点，避免重复）
+                if now.minute == 30 and now.hour not in _FETCH_HOURS:
                     data = load_latest(CACHE_FILE)
                     if data:
                         summary = build_names_summary(data, self._watchlist)
