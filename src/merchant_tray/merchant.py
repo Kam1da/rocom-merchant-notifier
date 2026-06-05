@@ -68,9 +68,7 @@ def fetch_merchant_data() -> dict:
         raise RuntimeError("未配置 MERCHANT_API_URL，请在 .env 中填写")
     data = _fetch_json(API_URL)
     items = _extract_current_items(data)
-    source_url = data.get("sourceUrl", "")
     filtered = {
-        "sourceUrl": source_url,
         "fetchedAt": data.get("fetchedAt", ""),
         "status": data.get("status", ""),
         "round": data.get("round"),
@@ -79,7 +77,6 @@ def fetch_merchant_data() -> dict:
         "items": items,
     }
     filtered["_local"] = {
-        "sourceApi": API_URL,
         "savedAtBeijing": beijing_stamp(now_beijing()),
     }
     return filtered
