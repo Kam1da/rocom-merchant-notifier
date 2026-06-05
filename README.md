@@ -21,10 +21,8 @@
 在项目根目录创建 `.env` 文件（可参考 `.env.example`），填入 API 地址：
 
 ```ini
-MERCHANT_API_URLS=你的API地址1,你的API地址2
+MERCHANT_API_URL=你的API地址
 ```
-
-多个地址用英文逗号分隔，程序会按顺序尝试，第一个失败自动切换下一个。
 
 > `.env` 文件包含你的私有配置，已加入 `.gitignore`，不会上传到仓库。
 
@@ -89,28 +87,6 @@ python -m merchant_tray.tray_app
 ├── start.bat                # 后台启动托盘程序
 └── README.md
 ```
-
-## 安装使用
-
-保留这些内容即可：
-
-```text
-assets/
-src/
-.env.example
-requirements.txt
-setup.bat
-start.bat
-README.md
-LICENSE
-```
-
-对方需要：
-1. 创建自己的 `.env` 文件并填入 API 地址
-2. 运行 `setup.bat` 安装依赖
-3. 双击 `start.bat` 启动
-
-`data/latest.json` 和 `data/watchlist.txt` 是个人运行数据，可以不发；对方运行后会自动生成或自行配置。
 
 ## 依赖
 

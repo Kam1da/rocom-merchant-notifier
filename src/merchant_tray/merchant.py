@@ -26,8 +26,7 @@ def _load_env_config() -> dict[str, str]:
 _env = _load_env_config()
 
 # API 地址从 .env 读取，不硬编码（.env 不上传到 GitHub）
-_raw_urls = _env.get("MERCHANT_API_URLS", "")
-API_URLS = [u.strip() for u in _raw_urls.split(",") if u.strip()] if _raw_urls else []
+API_URL = _env.get("MERCHANT_API_URL", "")
 BEIJING_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 # 抓取时间点（北京时间）
 FETCH_TIMES = ((8, 5), (12, 5), (16, 5), (20, 5))
@@ -64,31 +63,26 @@ def _fetch_json(url: str) -> dict:
 
 
 def fetch_merchant_data() -> dict:
-    """依次尝试两个 API，返回第一个成功结果（只保留当前轮次商品）。失败抛 RuntimeError。"""
-    last_err = None
-    for url in API_URLS:
-        try:
-            data = _fetch_json(url)
-            # 只保留当前轮次商品，丢弃其他时间段数据
-            items = _extract_current_items(data)
-            source_url = data.get("sourceUrl", "")
-            filtered = {
-                "sourceUrl": source_url,
-                "fetchedAt": data.get("fetchedAt", ""),
-                "status": data.get("status", ""),
-                "round": data.get("round"),
-                "startedAtBeijing": data.get("startedAtBeijing", ""),
-                "nextRefreshBeijing": data.get("nextRefreshBeijing", ""),
-                "items": items,
-            }
-            filtered["_local"] = {
-                "sourceApi": url,
-                "savedAtBeijing": beijing_stamp(now_beijing()),
-            }
-            return filtered
-        except Exception as exc:
-            last_err = exc
-    raise RuntimeError(f"所有接口请求失败: {last_err}")
+    """从 API 获取商品数据（只保留当前轮次商品）。失败抛 RuntimeError。"""
+    if not API_URL:
+        raise RuntimeError("未配置 MERCHANT_API_URL，请在 .env 中填写")
+    data = _fetch_json(API_URL)
+    items = _extract_current_items(data)
+    source_url = data.get("sourceUrl", "")
+    filtered = {
+        "sourceUrl": source_url,
+        "fetchedAt": data.get("fetchedAt", ""),
+        "status": data.get("status", ""),
+        "round": data.get("round"),
+        "startedAtBeijing": data.get("startedAtBeijing", ""),
+        "nextRefreshBeijing": data.get("nextRefreshBeijing", ""),
+        "items": items,
+    }
+    filtered["_local"] = {
+        "sourceApi": API_URL,
+        "savedAtBeijing": beijing_stamp(now_beijing()),
+    }
+    return filtered
 
 
 def _extract_current_items(data: dict) -> list[dict]:
