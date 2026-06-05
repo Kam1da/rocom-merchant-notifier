@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.spec
+.env
+data/latest.json
+data/watchlist.txt
+.vscode/
+.idea/
+Thumbs.db
