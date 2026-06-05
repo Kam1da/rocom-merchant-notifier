@@ -29,7 +29,7 @@ _env = _load_env_config()
 API_URL = _env.get("MERCHANT_API_URL", "")
 BEIJING_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 # 抓取时间点（北京时间）
-FETCH_TIMES = ((8, 5), (12, 5), (16, 5), (20, 5))
+FETCH_TIMES = ((8, 30), (12, 30), (16, 30), (20, 30))
 # 打包后数据文件放在 exe 同级目录；源码运行时放在项目根目录 data/ 下。
 if getattr(sys, "frozen", False):
     APP_ROOT = Path(sys.executable).parent
@@ -150,12 +150,12 @@ def build_short_summary(data: dict, watchlist: set[str] | None = None) -> str:
 # ── 定时 ──────────────────────────────────────────────────────
 
 def next_fetch_time(dt: datetime | None = None) -> datetime:
-    """返回下一个抓取时间点（北京时间 08:05 / 12:05 / 16:05 / 20:05）。"""
+    """返回下一个抓取时间点（北京时间 08:30 / 12:30 / 16:30 / 20:30）。"""
     dt = dt or now_beijing()
     for h, m in FETCH_TIMES:
         cand = datetime.combine(dt.date(), dtime(h, m), tzinfo=BEIJING_TZ)
         if cand > dt:
             return cand
-    # 今天已过，推到明天 08:05
+    # 今天已过，推到明天 08:30
     tomorrow = dt.date() + timedelta(days=1)
-    return datetime.combine(tomorrow, dtime(8, 5), tzinfo=BEIJING_TZ)
+    return datetime.combine(tomorrow, dtime(8, 30), tzinfo=BEIJING_TZ)

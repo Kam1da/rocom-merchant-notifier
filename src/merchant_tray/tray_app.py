@@ -1,7 +1,7 @@
 """远行商人托盘程序 — 入口。
 
-启动后常驻系统托盘，每小时抓取远行商人商品数据，
-基于商品指纹智能决策是否推送 Windows 通知。
+启动后常驻系统托盘，在 8:30/12:30/16:30/20:30 抓取远行商人商品数据，
+每小时 :30 提醒关注商品，基于商品指纹智能决策是否推送 Windows 通知。
 """
 
 import io
@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time as time_module
-import webbrowser
+from datetime import datetime, time as dtime, timedelta
 from xml.sax.saxutils import escape as xml_escape
 
 # Windows 控制台 UTF-8 输出（调试用，打包为 exe 后无影响）
@@ -51,10 +51,10 @@ CACHE_FILE = DATA_DIR / "latest.json"
 WATCHLIST_FILE = DATA_DIR / "watchlist.txt"
 APP_TITLE = "远行商人"
 
-# 每小时抓取间隔（秒）
-FETCH_INTERVAL = 3600
-# 关注商品持续提醒间隔（秒）
-WATCHLIST_REMINDER_INTERVAL = 1800
+# 抓取时间点（北京时间）
+FETCH_SCHEDULE = [(8, 30), (12, 30), (16, 30), (20, 30)]
+# 关注提醒触发分钟（每小时的第 30 分钟）
+REMINDER_MINUTE = 30
 # 连续抓取失败多少次后弹窗告警
 MAX_SILENT_FAILURES = 3
 
@@ -328,15 +328,6 @@ class MerchantTrayApp:
 
     # ── 菜单回调 ──────────────────────────────────────────────
 
-    def _on_open_url(self, icon, item):
-        """打开数据中返回的源网址。"""
-        data = load_latest(CACHE_FILE)
-        url = (data or {}).get("sourceUrl", "")
-        if url:
-            webbrowser.open(url)
-        else:
-            _notify("暂无源网址", "暂无源网址信息。")
-
     def _on_manage_watchlist(self, icon, item):
         """打开 tkinter 弹窗管理关注名单。"""
         threading.Thread(target=self._show_watchlist_dialog, daemon=True).start()
@@ -511,13 +502,26 @@ class MerchantTrayApp:
                     names.append(name)
             self._icon.title = ", ".join(names) if names else "无商品"
 
-    # ── 每小时抓取循环 ────────────────────────────────────────
+    # ── 定时抓取循环 ────────────────────────────────────────
 
-    def _hourly_fetch_loop(self):
-        """每小时抓取一次，按指纹决策树处理通知。"""
+    def _scheduled_fetch_loop(self):
+        """在指定时间点（8:30/12:30/16:30/20:30）抓取数据。"""
         while self._running:
-            # 等待 FETCH_INTERVAL 秒，每 1 秒检查 _running
-            for _ in range(FETCH_INTERVAL):
+            now = now_beijing()
+            target = None
+            for h, m in FETCH_SCHEDULE:
+                cand = datetime.combine(now.date(), dtime(h, m), tzinfo=now.tzinfo)
+                if cand > now:
+                    target = cand
+                    break
+            if target is None:
+                tomorrow = now.date() + timedelta(days=1)
+                fh, fm = FETCH_SCHEDULE[0]
+                target = datetime.combine(tomorrow, dtime(fh, fm), tzinfo=now.tzinfo)
+
+            wait = int((target - now).total_seconds())
+            print(f"[调度] 下次抓取: {target.strftime('%H:%M')} (等待 {wait}s)")
+            for _ in range(wait):
                 if not self._running:
                     return
                 time_module.sleep(1)
@@ -526,26 +530,29 @@ class MerchantTrayApp:
             print(f"[定时抓取] 触发 @ {beijing_stamp(now_beijing())}")
             self._do_fetch_and_process()
 
-    # ── 关注商品持续提醒循环 ─────────────────────────────────
+    # ── 关注商品定时提醒循环 ─────────────────────────────────
 
     def _watchlist_reminder_loop(self):
-        """每 30 分钟检查一次，如果有关注商品命中且未静音则提醒。"""
+        """每小时 :30 分检查，如果有关注商品命中且未静音则提醒。"""
+        last_reminder_key = ""
         while self._running:
-            # 等待 30 分钟
-            for _ in range(WATCHLIST_REMINDER_INTERVAL):
+            now = now_beijing()
+            if now.minute == REMINDER_MINUTE:
+                key = f"{now.hour}:{now.minute}"
+                if key != last_reminder_key:
+                    last_reminder_key = key
+                    if self._watchlist_hit_names and not self._watchlist_snoozed:
+                        hit_list = ", ".join(sorted(self._watchlist_hit_names))
+                        title = f"★ 关注商品仍在售：{hit_list}"
+                        data = load_latest(CACHE_FILE)
+                        summary = build_names_summary(data, self._watchlist) if data else hit_list
+                        _notify(title, summary)
+                        print(f"[定时提醒] {hit_list}")
+            # 每分钟检查一次
+            for _ in range(60):
                 if not self._running:
                     return
                 time_module.sleep(1)
-            if not self._running:
-                return
-            # 检查是否需要提醒
-            if self._watchlist_hit_names and not self._watchlist_snoozed:
-                hit_list = ", ".join(sorted(self._watchlist_hit_names))
-                title = f"★ 关注商品仍在售：{hit_list}"
-                data = load_latest(CACHE_FILE)
-                summary = build_names_summary(data, self._watchlist) if data else hit_list
-                _notify(title, summary)
-                print(f"[持续提醒] {hit_list}")
 
     # ── 启动 ──────────────────────────────────────────────────
 
@@ -561,9 +568,17 @@ class MerchantTrayApp:
         print("[启动] 首次抓取…")
         self._do_fetch_and_process()
 
+        # 启动后提醒一次（如果有关注商品命中）
+        if self._watchlist_hit_names and not self._watchlist_snoozed:
+            hit_list = ", ".join(sorted(self._watchlist_hit_names))
+            title = f"★ 关注商品在售：{hit_list}"
+            data = load_latest(CACHE_FILE)
+            summary = build_names_summary(data, self._watchlist) if data else hit_list
+            _notify(title, summary)
+            print(f"[启动提醒] {hit_list}")
+
         # 右键菜单
         menu = pystray.Menu(
-            pystray.MenuItem("打开源网址", self._on_open_url),
             pystray.MenuItem("管理关注名单", self._on_manage_watchlist),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -586,7 +601,7 @@ class MerchantTrayApp:
         self._update_tooltip()
 
         # 启动两个独立调度线程
-        threading.Thread(target=self._hourly_fetch_loop, daemon=True).start()
+        threading.Thread(target=self._scheduled_fetch_loop, daemon=True).start()
         threading.Thread(target=self._watchlist_reminder_loop, daemon=True).start()
 
         # 阻塞主线程（pystray 需要）
