@@ -53,7 +53,6 @@ APP_TITLE = "远行商人"
 
 # 抓取时间点（北京时间）
 FETCH_SCHEDULE = [(8, 30), (12, 30), (16, 30), (20, 30)]
-_FETCH_HOURS = {h for h, m in FETCH_SCHEDULE}
 # 关注提醒间隔（分钟）
 REMINDER_INTERVAL_NORMAL = 60   # 无关注命中时，每小时 :30 提醒
 REMINDER_INTERVAL_HIT = 10      # 有关注命中时，每 10 分钟提醒
@@ -254,8 +253,8 @@ class MerchantTrayApp:
 
     # ── 数据抓取 + 通知 ──────────────────────────────────────
 
-    def _do_fetch_and_process(self) -> None:
-        """抓取数据并处理通知。"""
+    def _do_fetch_and_process(self, notify: bool = True) -> None:
+        """抓取数据并处理通知。notify=False 时静默抓取不弹窗。"""
         ts = beijing_stamp(now_beijing())
         try:
             data = fetch_merchant_data()
@@ -295,13 +294,14 @@ class MerchantTrayApp:
             self._watchlist_hit_names = current_names & self._watchlist
 
         # ── 通知 ──
-        summary = build_names_summary(data, self._watchlist)
-        if self._watchlist_hit_names and not self._watchlist_snoozed:
-            hit_list = ", ".join(sorted(self._watchlist_hit_names))
-            _notify(f"★ 关注商品在售：{hit_list}", summary)
-            print(f"[关注命中] {hit_list}")
-        else:
-            _notify("商品数据已更新", summary)
+        if notify:
+            summary = build_names_summary(data, self._watchlist)
+            if self._watchlist_hit_names and not self._watchlist_snoozed:
+                hit_list = ", ".join(sorted(self._watchlist_hit_names))
+                _notify(f"★ 关注商品在售：{hit_list}", summary)
+                print(f"[关注命中] {hit_list}")
+            else:
+                _notify("商品数据已更新", summary)
         # 重置提醒计时器，避免与提醒循环重复
         self._last_reminder_ts = now_beijing().timestamp()
 
@@ -507,7 +507,7 @@ class MerchantTrayApp:
             if not self._running:
                 return
             print(f"[定时抓取] 触发 @ {beijing_stamp(now_beijing())}")
-            self._do_fetch_and_process()
+            self._do_fetch_and_process(notify=False)
 
     # ── 关注商品提醒循环 ─────────────────────────────────────
 
@@ -534,8 +534,8 @@ class MerchantTrayApp:
                     _notify(title, summary)
                     print(f"[关注提醒] {hit_list}")
             else:
-                # 无关注命中：每小时 :30 提醒（跳过抓取时间点，避免重复）
-                if now.minute == 30 and now.hour not in _FETCH_HOURS:
+                # 无关注命中：每小时 :30 提醒
+                if now.minute == 30:
                     data = load_latest(CACHE_FILE)
                     if data:
                         summary = build_names_summary(data, self._watchlist)
