@@ -337,7 +337,7 @@ class MerchantTrayApp:
         root.attributes("-topmost", True)
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         _set_tk_window_icon(root, tk)
-        root.withdraw()  # 先隐藏，布局完再居中显示
+        root.geometry("+9999+9999")  # 先放到屏幕外，布局完再移到中间
 
         main_frame = ttk.Frame(root, padding=16)
         main_frame.pack(fill="both", expand=True)
@@ -448,9 +448,7 @@ class MerchantTrayApp:
         w, h = root.winfo_width(), root.winfo_height()
         sx = (root.winfo_screenwidth() - w) // 2
         sy = (root.winfo_screenheight() - h) // 2
-        root.geometry(f"+{sx}+{sy}")
-        root.update()  # 让窗口管理器完成定位
-        root.after(200, root.deiconify)  # 延迟 200ms 再显示，避免残影
+        root.geometry(f"+{sx}+{sy}")  # 移到屏幕中间
 
         root.mainloop()
 
