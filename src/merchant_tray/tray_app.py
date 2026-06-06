@@ -7,6 +7,8 @@
 import io
 import hashlib
 import os
+import re as _re
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,13 +24,15 @@ if sys.platform == "win32":
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
     except Exception:
         pass
-from pathlib import Path
+from urllib.request import Request as UrlRequest, urlopen as url_urlopen
 
 # ── 依赖 ──────────────────────────────────────────────────────
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 import pystray
 
 from .merchant import (
+    APP_ROOT,
+    USER_AGENT,
     active_items,
     beijing_stamp,
     fetch_merchant_data,
@@ -38,16 +42,14 @@ from .merchant import (
 )
 
 # ── 常量 ──────────────────────────────────────────────────────
-# 打包后 sys.executable 指向 exe；源码运行时以项目根目录为应用目录。
-if getattr(sys, "frozen", False):
-    APP_DIR = Path(sys.executable).parent
-else:
-    APP_DIR = Path(__file__).resolve().parents[2]
+# 应用目录（打包/源码两种场景）由 merchant.APP_ROOT 统一计算。
+APP_DIR = APP_ROOT
 ASSETS_DIR = APP_DIR / "assets"
 DATA_DIR = APP_DIR / "data"
 ICON_PATH = ASSETS_DIR / "icon.png"
 ICON_ICO_PATH = ASSETS_DIR / "icon.ico"
 CACHE_FILE = DATA_DIR / "latest.json"
+IMAGES_DIR = DATA_DIR / "images"
 WATCHLIST_FILE = DATA_DIR / "watchlist.txt"
 APP_TITLE = "远行商人"
 
@@ -186,6 +188,72 @@ def _generate_icon_image() -> Image.Image:
     return img
 
 
+def _generate_placeholder_image(size: int = 60) -> Image.Image:
+    """生成占位图（灰色背景 + 问号），用于图片加载失败时兜底。"""
+    img = Image.new("RGBA", (size, size), (200, 200, 200, 255))
+    draw = ImageDraw.Draw(img, "RGBA")
+    draw.text((size // 2 - 6, size // 2 - 10), "?", fill=(120, 120, 120, 255))
+    return img
+
+
+def _download_image(url: str, size: int = 60) -> Image.Image:
+    """从 URL 下载图片并缩放到指定尺寸；失败时返回占位图。"""
+    if not url:
+        return _generate_placeholder_image(size)
+    try:
+        req = UrlRequest(url, headers={
+            "User-Agent": USER_AGENT,
+            "Referer": "https://patchwiki.biligame.com/",
+        })
+        with url_urlopen(req, timeout=10) as resp:
+            img_data = resp.read()
+        img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        return img.resize((size, size), Image.LANCZOS)
+    except Exception as exc:
+        print(f"[图片下载失败] {url}: {exc}")
+        return _generate_placeholder_image(size)
+
+
+def _sanitize_filename(name: str) -> str:
+    """将商品名转为安全文件名：去除非法字符，截断过长名称。"""
+    name = _re.sub(r'[\\/:*?"<>|]', '', name).strip()
+    return name[:50] if name else "unnamed"
+
+
+def _download_all_images(data: dict) -> None:
+    """抓取成功后将所有商品图片下载到 IMAGES_DIR，覆盖旧文件。"""
+    items = active_items(data)
+    if not items:
+        return
+    try:
+        # 清空旧图片目录
+        if IMAGES_DIR.exists():
+            shutil.rmtree(IMAGES_DIR)
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+        for i, item in enumerate(items):
+            img_url = item.get("image", "")
+            name = item.get("name") or f"item_{i}"
+            filename = f"{_sanitize_filename(name)}.png"
+            pil_img = _download_image(img_url, 60)
+            pil_img.save(IMAGES_DIR / filename, "PNG")
+            print(f"[图片保存] {filename}")
+    except Exception as exc:
+        print(f"[图片批量下载失败] {exc}")
+
+
+def _load_local_image(item_name: str, size: int = 60) -> Image.Image:
+    """从本地缓存加载商品图片；不存在时返回占位图。"""
+    filename = f"{_sanitize_filename(item_name)}.png"
+    img_path = IMAGES_DIR / filename
+    if img_path.exists():
+        try:
+            return Image.open(img_path).convert("RGBA").resize((size, size), Image.LANCZOS)
+        except Exception:
+            pass
+    return _generate_placeholder_image(size)
+
+
 def _load_icon() -> Image.Image:
     if ICON_PATH.exists():
         try:
@@ -209,6 +277,21 @@ def _set_tk_window_icon(window, tk_module) -> None:
             window.iconphoto(True, window._merchant_icon)
         except Exception:
             pass
+
+
+def _center_and_show(root) -> None:
+    """布局完成后将窗口移到屏幕中央并置顶聚焦。
+
+    采用 off-screen 定位（窗口先创建在屏幕外，布局完再移入），
+    避免 withdraw/deiconify 在部分系统上造成的残影。
+    """
+    root.update_idletasks()
+    w, h = root.winfo_width(), root.winfo_height()
+    sx = (root.winfo_screenwidth() - w) // 2
+    sy = (root.winfo_screenheight() - h) // 2
+    root.geometry(f"+{sx}+{sy}")
+    root.lift()
+    root.focus_force()
 
 
 # ── 核心逻辑 ──────────────────────────────────────────────────
@@ -272,6 +355,7 @@ class MerchantTrayApp:
         # ── 抓取成功 ──
         self._fail_count = 0
         save_latest(data, CACHE_FILE)
+        _download_all_images(data)
 
         items = active_items(data)
         new_round = data.get("round")
@@ -316,7 +400,114 @@ class MerchantTrayApp:
         self._watchlist_snoozed = True
         self._watchlist_hit_names.clear()
         print("[静音] 本轮关注提醒已暂停")
-        _notify("关注提醒已暂停", "本轮不再提醒关注商品。\n商品变化或下一轮后自动恢复。")
+        _notify("关注提醒已暂停", "本轮不再提醒关注商品。")
+
+    def _on_show_products(self, icon, item):
+        """打开"当前商品"弹窗（在新线程中运行 tkinter）。"""
+        threading.Thread(target=self._show_products_dialog, daemon=True).start()
+
+    def _show_products_dialog(self):
+        """弹窗展示当前商品名和图片。"""
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            _notify("当前商品不可用", "tkinter 不可用，无法打开商品弹窗。")
+            return
+
+        data = load_latest(CACHE_FILE)
+        items = active_items(data) if data else []
+
+        root = tk.Tk()
+        root.geometry("+9999+9999")  # 先放到屏幕外，布局完再移到中间
+        root.title("当前出售商品")
+        root.resizable(False, False)
+        root.attributes("-topmost", True)
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
+        _set_tk_window_icon(root, tk)
+
+        main_frame = ttk.Frame(root, padding=16)
+        main_frame.pack(fill="both", expand=True)
+
+        if not items:
+            ttk.Label(
+                main_frame,
+                text="（暂无商品数据）",
+                foreground="gray",
+                font=("Microsoft YaHei UI", 11),
+            ).pack(pady=20)
+        else:
+            # 引用列表，防止 PhotoImage 被垃圾回收
+            _photo_refs = []
+
+            # 配色
+            HL_BG = "#FFF8DC"       # 关注商品背景（浅黄）
+            HL_BORDER = "#DAA520"   # 关注商品边框（金色）
+            NORMAL_BG = "#FFFFFF"    # 普通商品背景
+            HL_TEXT = "#B8860B"     # 关注商品价格文字（暗金）
+
+            for item in items:
+                name = item.get("name", "未命名")
+                is_watched = name in self._watchlist
+
+                # ── 整行容器（关注商品带金色边框 + 浅黄底）──
+                row = tk.Frame(
+                    main_frame,
+                    bg=HL_BG if is_watched else NORMAL_BG,
+                    highlightbackground=HL_BORDER if is_watched else NORMAL_BG,
+                    highlightthickness=2 if is_watched else 0,
+                )
+                row.pack(fill="x", pady=4, ipady=4)
+
+                # ── 商品图片（从本地缓存读取）──
+                pil_img = _load_local_image(name, 60)
+                tk_img = ImageTk.PhotoImage(pil_img)
+                _photo_refs.append(tk_img)
+
+                img_label = tk.Label(
+                    row, image=tk_img,
+                    bg=HL_BG if is_watched else NORMAL_BG,
+                )
+                img_label.image = tk_img  # 防 GC
+                img_label.pack(side="left", padx=(8, 12))
+
+                # ── 商品信息 ──
+                info_frame = tk.Frame(
+                    row, bg=HL_BG if is_watched else NORMAL_BG,
+                )
+                info_frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+                display_name = f"★ {name}" if is_watched else name
+                name_label = tk.Label(
+                    info_frame,
+                    text=display_name,
+                    font=("Microsoft YaHei UI", 11, "bold"),
+                    fg=HL_TEXT if is_watched else "#000",
+                    bg=HL_BG if is_watched else NORMAL_BG,
+                )
+                name_label.pack(anchor="w")
+
+                price = item.get("price", "-")
+                limit = item.get("limit", "-")
+                detail = f"价格: {price} 洛克贝"
+                if limit:
+                    detail += f"  |  限购: {limit}"
+                detail_label = tk.Label(
+                    info_frame,
+                    text=detail,
+                    font=("Microsoft YaHei UI", 9),
+                    fg=HL_TEXT if is_watched else "#666",
+                    bg=HL_BG if is_watched else NORMAL_BG,
+                )
+                detail_label.pack(anchor="w")
+
+        # 居中显示
+        _center_and_show(root)
+
+        # 点击窗口外部区域关闭
+        root.bind("<FocusOut>", lambda e: root.destroy() if not root.focus_get() else None)
+
+        root.mainloop()
 
     def _show_watchlist_dialog(self):
         """用 tkinter 展示当前商品列表，勾选添加到关注名单。"""
@@ -332,12 +523,12 @@ class MerchantTrayApp:
         product_set = set(products)
 
         root = tk.Tk()
+        root.geometry("+9999+9999")  # 先放到屏幕外，布局完再移到中间
         root.title("管理关注名单")
         root.resizable(False, False)
         root.attributes("-topmost", True)
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         _set_tk_window_icon(root, tk)
-        root.geometry("+9999+9999")  # 先放到屏幕外，布局完再移到中间
 
         main_frame = ttk.Frame(root, padding=16)
         main_frame.pack(fill="both", expand=True)
@@ -443,12 +634,8 @@ class MerchantTrayApp:
         ttk.Button(btn_frame, text="保存", command=_save).pack(side="left")
         ttk.Button(btn_frame, text="取消", command=_cancel).pack(side="left", padx=(8, 0))
 
-        # 居中窗口
-        root.update_idletasks()
-        w, h = root.winfo_width(), root.winfo_height()
-        sx = (root.winfo_screenwidth() - w) // 2
-        sy = (root.winfo_screenheight() - h) // 2
-        root.geometry(f"+{sx}+{sy}")  # 移到屏幕中间
+        # 居中显示
+        _center_and_show(root)
 
         root.mainloop()
 
@@ -459,25 +646,10 @@ class MerchantTrayApp:
     # ── 托盘提示 ──────────────────────────────────────────────
 
     def _update_tooltip(self, text: str | None = None):
-        """鼠标悬浮时只显示商品名称。"""
+        """鼠标悬浮时只显示"远行商人"四个字。"""
         if self._icon is None:
             return
-        if text:
-            self._icon.title = text
-            return
-        data = load_latest(CACHE_FILE)
-        if data is None:
-            self._icon.title = "暂无数据"
-        else:
-            items = active_items(data)
-            names = []
-            for it in items:
-                name = it.get("name", "?")
-                if name in self._watchlist:
-                    names.append(f"★{name}")
-                else:
-                    names.append(name)
-            self._icon.title = ", ".join(names) if names else "无商品"
+        self._icon.title = text if text else APP_TITLE
 
     # ── 定时抓取循环 ────────────────────────────────────────
 
@@ -570,6 +742,7 @@ class MerchantTrayApp:
 
         # 右键菜单
         menu = pystray.Menu(
+            pystray.MenuItem("当前商品", self._on_show_products),
             pystray.MenuItem("管理关注名单", self._on_manage_watchlist),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(

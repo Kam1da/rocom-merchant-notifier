@@ -29,8 +29,6 @@ _env = _load_env_config()
 # 数据源地址从 .env 读取（不硬编码真实地址）
 SOURCE_URL = _env.get("MERCHANT_API_URL", "")
 BEIJING_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
-# 抓取时间点（北京时间）
-FETCH_TIMES = ((8, 30), (12, 30), (16, 30), (20, 30))
 # 打包后数据文件放在 exe 同级目录；源码运行时放在项目根目录 data/ 下。
 if getattr(sys, "frozen", False):
     APP_ROOT = Path(sys.executable).parent
@@ -50,12 +48,14 @@ def beijing_stamp(dt: datetime) -> str:
 
 # ── 网络请求 ──────────────────────────────────────────────────
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+
 _HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
@@ -84,46 +84,6 @@ def _parse_js_var(html: str, name: str, type_: str = "int") -> int | list | str 
     return None
 
 
-def _parse_onclick_args(onclick: str) -> list[str] | None:
-    """
-    解析 showShopinfo('img','name','cat','desc') 中的四个单引号字符串参数。
-    正确处理 JS 的 \\' 转义。
-    """
-    m = re.search(r"showShopinfo\((.+)\)", onclick, re.DOTALL)
-    if not m:
-        return None
-    raw = m.group(1).strip()
-    args: list[str] = []
-    i = 0
-    while len(args) < 4:
-        # 找到下一个单引号开头
-        q = raw.find("'", i)
-        if q == -1:
-            break
-        i = q + 1
-        chars: list[str] = []
-        while i < len(raw):
-            c = raw[i]
-            if c == "\\":
-                # 转义字符：取下一个字符
-                i += 1
-                if i < len(raw):
-                    chars.append(raw[i])
-                i += 1
-            elif c == "'":
-                # 字符串结束
-                i += 1
-                break
-            else:
-                chars.append(c)
-                i += 1
-        args.append("".join(chars))
-        # 跳过 ', ' 分隔符
-        while i < len(raw) and raw[i] in ", ":
-            i += 1
-    return args if args else None
-
-
 def _parse_merchant_html(html: str) -> dict:
     """从远行商人查询器页面 HTML 中解析商品数据。返回与旧 API 兼容的 dict 结构。"""
     # ── JS 变量 ──
@@ -144,14 +104,9 @@ def _parse_merchant_html(html: str) -> dict:
         # 提取关键属性
         class_m = re.search(r'class="([^"]*)"', tag_attrs)
         style_m = re.search(r'style="([^"]*)"', tag_attrs)
-        dtime_m = re.search(r'data-time="(\d+)"', tag_attrs)
-        # onclick 值用双引号包裹，内部含有单引号——不能用 [^"']*
-        onclick_m = re.search(r'onclick="((?:[^"\\]|\\.)*)"', tag_attrs)
 
         classes = class_m.group(1) if class_m else ""
         style = style_m.group(1) if style_m else ""
-        end_ts = int(dtime_m.group(1)) if dtime_m else 0
-        onclick_raw = onclick_m.group(1) if onclick_m else ""
 
         # 只处理当前时间段且可见的商品
         if "display:none" in style.replace(" ", ""):
@@ -173,27 +128,11 @@ def _parse_merchant_html(html: str) -> dict:
         if img_url.startswith("//"):
             img_url = "https:" + img_url
 
-        # ── 从 onclick 提取分类和描述 ──
-        category = ""
-        description = ""
-        args = _parse_onclick_args(onclick_raw)
-        if args:
-            if not img_url and len(args) > 0:
-                img_url = args[0]
-            if len(args) > 2:
-                category = args[2]
-            if len(args) > 3:
-                description = args[3]
-
-        # 将 "48w" → "48w" 原样保留；"1000" → "1000"
         items.append({
             "name": name,
             "price": price_raw,
-            "priceRaw": price_raw,
             "limit": limit,
             "image": img_url,
-            "category": category,
-            "description": description,
         })
 
     # ── 时间计算 ──
@@ -268,45 +207,3 @@ def active_items(data: dict) -> list[dict]:
     items = data.get("items")
     return items if isinstance(items, list) else []
 
-
-def price_text(item: dict) -> str:
-    raw = str(item.get("priceRaw") or "").strip()
-    price = str(item.get("price") or "").strip()
-    return raw or price or "-"
-
-
-# ── 消息构建 ──────────────────────────────────────────────────
-
-def build_short_summary(data: dict, watchlist: set[str] | None = None) -> str:
-    """用于托盘通知的简短摘要。"""
-    items = active_items(data)
-    rnd = data.get("round") or "-"
-    watchlist = watchlist or set()
-
-    lines = [f"第 {rnd} 轮"]
-
-    if not items:
-        lines.append("当前无商品")
-    else:
-        for it in items:
-            name = it.get("name") or "未命名"
-            p = price_text(it)
-            lim = it.get("limit") or "-"
-            prefix = "★ " if name in watchlist else ""
-            lines.append(f"{prefix}{name}  {p}洛克贝  限购{lim}")
-
-    return "\n".join(lines)
-
-
-# ── 定时 ──────────────────────────────────────────────────────
-
-def next_fetch_time(dt: datetime | None = None) -> datetime:
-    """返回下一个抓取时间点（北京时间 08:30 / 12:30 / 16:30 / 20:30）。"""
-    dt = dt or now_beijing()
-    for h, m in FETCH_TIMES:
-        cand = datetime.combine(dt.date(), dtime(h, m), tzinfo=BEIJING_TZ)
-        if cand > dt:
-            return cand
-    # 今天已过，推到明天 08:30
-    tomorrow = dt.date() + timedelta(days=1)
-    return datetime.combine(tomorrow, dtime(8, 30), tzinfo=BEIJING_TZ)
